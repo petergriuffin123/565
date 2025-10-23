@@ -6,11 +6,9 @@ function Test-IsBypassProcess {
 if (-not (Test-IsBypassProcess)) {
     $scriptPath = $MyInvocation.MyCommand.Path
     if ($scriptPath) {
-        $escapedArgs = $args | ForEach-Object {
-            if ($_ -match '\s') { '"' + $_.Replace('"','\"') + '"' } else { $_ }
-        } -join ' '
-        $psArgs = "-NoProfile -ExecutionPolicy Bypass -File `"$scriptPath`" $escapedArgs"
-        $proc = Start-Process -FilePath (Get-Command pwsh -ErrorAction SilentlyContinue)?.Source ?? (Get-Command powershell.exe).Source -ArgumentList $psArgs -NoNewWindow -Wait -PassThru
+        $escapedArgs = $args | ForEach-Object { if ($_ -match '\s') { '"' + $_.Replace('"','\"') + '"' } else { $_ } } -join ' '
+        $exe = (Get-Command pwsh -ErrorAction SilentlyContinue)?.Source ?? (Get-Command powershell.exe).Source
+        $proc = Start-Process -FilePath $exe -ArgumentList "-NoProfile -ExecutionPolicy Bypass -File `"$scriptPath`" $escapedArgs" -Wait -PassThru
         exit $proc.ExitCode
     }
 
@@ -19,29 +17,50 @@ if (-not (Test-IsBypassProcess)) {
         exit 1
     }
 
-    $argsTemp = [System.IO.Path]::Combine([System.IO.Path]::GetTempPath(), [System.Guid]::NewGuid().ToString() + '.json')
-    $args | ConvertTo-Json -Compress | Out-File -FilePath $argsTemp -Encoding UTF8
+    $argsTemp = [System.IO.Path]::Combine([System.IO.Path]::GetTempPath(), "ps_args_{0}.json" -f [System.Guid]::NewGuid())
+    $args | ConvertTo-Json -Compress | Set-Content -Path $argsTemp -Encoding UTF8
 
     $wrapper = @"
 `$argsFromFile = (Get-Content -Raw -Encoding UTF8 '$argsTemp' | ConvertFrom-Json)
-# restore $args in the child process
-`$script:args = @()
-if (`$argsFromFile) { `$script:args += `$argsFromFile }
-# original script start
+if (`$argsFromFile) { `$script:args = @(); `$script:args += `$argsFromFile }
+try {
 $scriptText
-# original script end
+} finally {
 Remove-Item -LiteralPath '$argsTemp' -ErrorAction SilentlyContinue
+}
 "@
 
-    $bytes = [System.Text.Encoding]::Unicode.GetBytes($wrapper)
-    $b64   = [Convert]::ToBase64String($bytes)
+    $b64 = [Convert]::ToBase64String([Text.Encoding]::Unicode.GetBytes($wrapper))
 
-    $pwExe = (Get-Command pwsh -ErrorAction SilentlyContinue)?.Source
-    if (-not $pwExe) { $pwExe = (Get-Command powershell.exe -ErrorAction SilentlyContinue).Source }
+    $exe = (Get-Command pwsh -ErrorAction SilentlyContinue)?.Source ?? (Get-Command powershell.exe -ErrorAction SilentlyContinue).Source
+    if (-not $exe) { Write-Error "No PowerShell executable found."; exit 1 }
 
-    $argsList = "-NoProfile", "-ExecutionPolicy", "Bypass", "-EncodedCommand", $b64
-    $proc = Start-Process -FilePath $pwExe -ArgumentList $argsList -NoNewWindow -RedirectStandardOutput ([System.IO.StreamWriter]::Null) -PassThru -Wait
-    exit $proc.ExitCode
+    $psi = New-Object System.Diagnostics.ProcessStartInfo
+    $psi.FileName = $exe
+    $psi.Arguments = "-NoProfile -ExecutionPolicy Bypass -EncodedCommand $b64"
+    $psi.RedirectStandardOutput = $true
+    $psi.RedirectStandardError  = $true
+    $psi.UseShellExecute = $false
+    $psi.CreateNoWindow = $true
+
+    $proc = New-Object System.Diagnostics.Process
+    $proc.StartInfo = $psi
+    $proc.EnableRaisingEvents = $true
+
+    $proc.add_OutputDataReceived( { param($s,$e) if ($e.Data -ne $null) { Write-Output $e.Data } } )
+    $proc.add_ErrorDataReceived(  { param($s,$e) if ($e.Data -ne $null) { Write-Error  $e.Data } } )
+
+    if (-not $proc.Start()) {
+        exit 1
+    }
+
+    $proc.BeginOutputReadLine()
+    $proc.BeginErrorReadLine()
+    $proc.WaitForExit()
+
+    $exitCode = $proc.ExitCode
+    Remove-Item -LiteralPath $argsTemp -ErrorAction SilentlyContinue
+    exit $exitCode
 }
 
 $hwnd = (Get-Process -Id $PID).MainWindowHandle
